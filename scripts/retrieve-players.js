@@ -1,530 +1,508 @@
 /**
  * =====================================================================
- * DUKE'S FF26 — PLAYER RETRIEVAL MODULE
- * Official Release: v1.0.0
- * File: scripts/retrieve-players.js
+ * DUKE'S FF26 — LIVE PLAYER DATA CONTROLLER
+ * Official Release: v1.1.0
+ * File: scripts/update-player-data.js
+ * =====================================================================
+ *
+ * PURPOSE
+ * -------
+ * 1. Retrieve current NFL player metadata from Sleeper.
+ * 2. Load the previous live-player-data.json file.
+ * 3. Preserve rankings, ADP, projections, bye weeks, news, movement,
+ *    and Duke metrics already stored.
+ * 4. Update teams, injuries, availability, and depth-chart information.
+ * 5. Write the merged results back to live-player-data.json.
  * =====================================================================
  */
 
 'use strict';
 
-const SLEEPER_NFL_PLAYERS_URL =
-  'https://api.sleeper.app/v1/players/nfl';
+const fs = require('node:fs/promises');
+const path = require('node:path');
 
-const MODULE_VERSION = '1.0.0';
+const {
+  retrievePlayers,
+  normalizeName,
+  normalizePosition
+} = require('./retrieve-players');
 
-const DEFAULT_TIMEOUT_MS = 30_000;
-const DEFAULT_RETRIES = 3;
+const CONTROLLER_VERSION = '1.1.0';
 
-const ALLOWED_POSITIONS = new Set([
-  'QB',
-  'RB',
-  'WR',
-  'TE',
-  'K',
-  'DEF'
-]);
+const OUTPUT_FILE = path.join(
+  process.cwd(),
+  'data',
+  'live-player-data.json'
+);
 
-function sleep(milliseconds) {
-  return new Promise(resolve => {
-    setTimeout(resolve, milliseconds);
-  });
+function createMatchKey(player = {}) {
+  const name = normalizeName(player.name);
+
+  const position = normalizePosition(
+    player.position || player.pos
+  );
+
+  return `${name}|${position}`;
 }
 
-function normalizePosition(position) {
-  const value = String(position ?? '')
-    .trim()
-    .toUpperCase();
-
-  if (
-    value === 'DST' ||
-    value === 'D/ST' ||
-    value === 'DEFENSE'
-  ) {
-    return 'DEF';
-  }
-
-  return value;
-}
-
-function normalizeName(name) {
-  return String(name ?? '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/\b(jr|sr|ii|iii|iv)\b\.?/g, '')
-    .replace(/[^a-z0-9]/g, '');
-}
-
-function createFallbackPlayerId(name, position) {
-  const cleanName =
-    normalizeName(name) || 'unknown-player';
-
-  const cleanPosition =
-    normalizePosition(position).toLowerCase() || 'unknown';
-
-  return `${cleanName}-${cleanPosition}`;
-}
-
-function isDefenseRecord(playerId, player = {}) {
-  const position = normalizePosition(player.position);
-
-  if (position === 'DEF') return true;
-
-  const id = String(playerId ?? '').toUpperCase();
-  const fullName = String(player.full_name ?? '')
-    .trim()
-    .toLowerCase();
-
+function getSleeperId(player = {}) {
   return (
-    id.startsWith('DEF_') ||
-    fullName.endsWith(' defense') ||
-    fullName.endsWith(' dst')
+    player.externalIds?.sleeper ||
+    (
+      String(player.playerId || '').startsWith('sleeper:')
+        ? String(player.playerId).replace('sleeper:', '')
+        : null
+    )
   );
 }
 
-function resolvePlayerName(playerId, player = {}) {
-  const fullName = String(player.full_name ?? '').trim();
+async function readExistingData() {
+  try {
+    const text = await fs.readFile(
+      OUTPUT_FILE,
+      'utf8'
+    );
 
-  if (fullName) return fullName;
+    const data = JSON.parse(text);
 
-  const firstName = String(player.first_name ?? '').trim();
-  const lastName = String(player.last_name ?? '').trim();
-  const combinedName = `${firstName} ${lastName}`.trim();
+    if (!Array.isArray(data.players)) {
+      return {
+        schemaVersion: 1,
+        players: []
+      };
+    }
 
-  if (combinedName) return combinedName;
+    return data;
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return {
+        schemaVersion: 1,
+        players: []
+      };
+    }
 
-  if (isDefenseRecord(playerId, player)) {
-    const team = String(
-      player.team ?? playerId ?? 'Unknown'
-    ).toUpperCase();
-
-    return `${team} Defense`;
+    throw new Error(
+      `Unable to read existing player data: ${error.message}`,
+      { cause: error }
+    );
   }
-
-  return String(playerId ?? 'Unknown Player');
 }
 
-function normalizeInjuryStatus(status) {
-  const value = String(status ?? '').trim();
-
-  if (!value) return 'Healthy';
-
-  const upper = value.toUpperCase();
-
-  const labels = {
-    Q: 'Questionable',
-    D: 'Doubtful',
-    O: 'Out',
-    IR: 'Injured Reserve',
-    PUP: 'PUP',
-    SUS: 'Suspended'
-  };
-
-  return labels[upper] ?? value;
-}
-
-function nullableFiniteNumber(value) {
-  if (
-    value === null ||
-    value === undefined ||
-    value === ''
-  ) {
-    return null;
-  }
-
-  const number = Number(value);
-
-  return Number.isFinite(number) ? number : null;
-}
-
-function shouldIncludePlayer(playerId, rawPlayer = {}) {
-  const position = isDefenseRecord(playerId, rawPlayer)
-    ? 'DEF'
-    : normalizePosition(rawPlayer.position);
-
-  if (!ALLOWED_POSITIONS.has(position)) {
-    return false;
-  }
-
-  const name = resolvePlayerName(playerId, rawPlayer);
-
-  return Boolean(name && position);
-}
-
-function mapSleeperPlayer(
-  playerId,
-  rawPlayer = {},
-  updatedAt
+function mergePlayerRecords(
+  retrievedPlayer,
+  existingPlayer = null
 ) {
-  const position = isDefenseRecord(playerId, rawPlayer)
-    ? 'DEF'
-    : normalizePosition(rawPlayer.position);
-
-  const name = resolvePlayerName(playerId, rawPlayer);
-  const sleeperId = String(playerId ?? '').trim();
-
-  const rawInjuryStatus = String(
-    rawPlayer.injury_status ?? ''
-  ).trim();
-
-  const normalizedInjuryCode =
-    rawInjuryStatus.toUpperCase();
-
-  const team = rawPlayer.team
-    ? String(rawPlayer.team).toUpperCase()
-    : null;
+  if (!existingPlayer) {
+    return retrievedPlayer;
+  }
 
   return {
-    playerId: sleeperId
-      ? `sleeper:${sleeperId}`
-      : createFallbackPlayerId(name, position),
+    ...retrievedPlayer,
+
+    playerId:
+      existingPlayer.playerId ||
+      retrievedPlayer.playerId,
 
     externalIds: {
-      sleeper: sleeperId || null,
-      fantasyPros: null,
-      espn: null,
-      yahoo: null
+      ...retrievedPlayer.externalIds,
+      ...existingPlayer.externalIds,
+
+      sleeper:
+        retrievedPlayer.externalIds?.sleeper ||
+        existingPlayer.externalIds?.sleeper ||
+        null
     },
 
-    name,
-    position,
-    team,
-    byeWeek: null,
+    byeWeek:
+      existingPlayer.byeWeek ??
+      retrievedPlayer.byeWeek ??
+      null,
 
     rankings: {
-      overall: null,
-      position: null,
-      tier: null,
-      fantasyPros: null,
-      espn: null,
-      yahoo: null,
-      sleeper: null
+      ...retrievedPlayer.rankings,
+      ...existingPlayer.rankings
     },
 
     adp: {
-      consensus: null,
-      fantasyPros: null,
-      espn: null,
-      yahoo: null,
-      sleeper: null
+      ...retrievedPlayer.adp,
+      ...existingPlayer.adp
     },
 
     projections: {
-      seasonPoints: null,
-      weeklyPoints: null,
-      receptions: null,
-      passingYards: null,
-      passingTouchdowns: null,
-      rushingYards: null,
-      rushingTouchdowns: null,
-      receivingYards: null,
-      receivingTouchdowns: null
-    },
-
-    injury: {
-      status: normalizeInjuryStatus(rawInjuryStatus),
-
-      bodyPart: String(
-        rawPlayer.injury_body_part ?? ''
-      ),
-
-      practiceStatus: String(
-        rawPlayer.practice_participation ?? ''
-      ),
-
-      notes: String(
-        rawPlayer.injury_notes ?? ''
-      ),
-
-      updatedAt
-    },
-
-    availability: {
-      active: rawPlayer.active !== false,
-      freeAgent: !team,
-      suspended: normalizedInjuryCode === 'SUS',
-      injuredReserve: normalizedInjuryCode === 'IR',
-      physicallyUnableToPerform:
-        normalizedInjuryCode === 'PUP'
-    },
-
-    depthChart: {
-      position:
-        rawPlayer.depth_chart_position ?? null,
-
-      order: nullableFiniteNumber(
-        rawPlayer.depth_chart_order
-      )
+      ...retrievedPlayer.projections,
+      ...existingPlayer.projections
     },
 
     news: {
-      headline: '',
-      summary: '',
-      source: '',
-      publishedAt: null
+      ...retrievedPlayer.news,
+      ...existingPlayer.news
     },
 
     movement: {
-      previousRank: null,
-      rankChange: 0,
-      previousAdp: null,
-      adpChange: 0,
-      trend: 'neutral'
+      ...retrievedPlayer.movement,
+      ...existingPlayer.movement
     },
 
     dukeMetrics: {
-      draftScore: null,
-      valueScore: null,
-      injuryRisk: null,
-      roleRisk: null,
-      upsideScore: null,
-      floorScore: null,
-      scarcityScore: null,
-      confidenceScore: null,
-      sleeperScore: null,
-      bustRisk: null
+      ...retrievedPlayer.dukeMetrics,
+      ...existingPlayer.dukeMetrics
     },
 
-    sources: ['Sleeper'],
-    updatedAt
+    sources: [
+      ...new Set([
+        ...(existingPlayer.sources || []),
+        ...(retrievedPlayer.sources || [])
+      ])
+    ],
+
+    updatedAt:
+      retrievedPlayer.updatedAt ||
+      existingPlayer.updatedAt ||
+      null
   };
 }
 
-function isRetryableStatus(status) {
-  return (
-    status === 408 ||
-    status === 425 ||
-    status === 429 ||
-    status >= 500
-  );
-}
-
-async function fetchJsonWithRetry(
-  url,
-  {
-    timeoutMs = DEFAULT_TIMEOUT_MS,
-    retries = DEFAULT_RETRIES
-  } = {}
+function mergePlayerCollections(
+  retrievedPlayers,
+  existingPlayers
 ) {
-  if (
-    !Number.isInteger(retries) ||
-    retries < 1
-  ) {
-    throw new TypeError(
-      'retries must be a positive integer.'
+  const existingBySleeperId = new Map();
+  const existingByNamePosition = new Map();
+
+  for (const player of existingPlayers) {
+    const sleeperId = getSleeperId(player);
+
+    if (sleeperId) {
+      existingBySleeperId.set(
+        String(sleeperId),
+        player
+      );
+    }
+
+    existingByNamePosition.set(
+      createMatchKey(player),
+      player
     );
   }
 
-  if (
-    !Number.isFinite(timeoutMs) ||
-    timeoutMs <= 0
-  ) {
-    throw new TypeError(
-      'timeoutMs must be a positive number.'
+  const mergedPlayers = [];
+  const matchedExistingPlayers = new Set();
+
+  for (const retrievedPlayer of retrievedPlayers) {
+    const sleeperId = getSleeperId(retrievedPlayer);
+
+    let existingPlayer = null;
+
+    if (
+      sleeperId &&
+      existingBySleeperId.has(String(sleeperId))
+    ) {
+      existingPlayer =
+        existingBySleeperId.get(String(sleeperId));
+    }
+
+    if (!existingPlayer) {
+      existingPlayer =
+        existingByNamePosition.get(
+          createMatchKey(retrievedPlayer)
+        ) || null;
+    }
+
+    if (existingPlayer) {
+      matchedExistingPlayers.add(existingPlayer);
+    }
+
+    mergedPlayers.push(
+      mergePlayerRecords(
+        retrievedPlayer,
+        existingPlayer
+      )
     );
   }
 
-  let lastError = null;
+  /*
+   * Preserve unmatched existing records.
+   *
+   * This protects spreadsheet players or manually added players that
+   * Sleeper does not currently return.
+   */
+  for (const existingPlayer of existingPlayers) {
+    if (!matchedExistingPlayers.has(existingPlayer)) {
+      mergedPlayers.push({
+        ...existingPlayer,
 
-  for (
-    let attempt = 1;
-    attempt <= retries;
-    attempt += 1
-  ) {
-    const controller = new AbortController();
-
-    const timeout = setTimeout(() => {
-      controller.abort();
-    }, timeoutMs);
-
-    try {
-      const response = await fetch(url, {
-        method: 'GET',
-
-        headers: {
-          Accept: 'application/json',
-          'User-Agent':
-            `Dukes-FF26-Data-Updater/${MODULE_VERSION}`
-        },
-
-        signal: controller.signal
+        sources: [
+          ...new Set([
+            ...(existingPlayer.sources || []),
+            'Existing database'
+          ])
+        ]
       });
-
-      if (!response.ok) {
-        const error = new Error(
-          `HTTP ${response.status} ${response.statusText}`
-        );
-
-        error.status = response.status;
-
-        if (!isRetryableStatus(response.status)) {
-          throw error;
-        }
-
-        lastError = error;
-      } else {
-        const contentType = String(
-          response.headers.get('content-type') ?? ''
-        ).toLowerCase();
-
-        if (!contentType.includes('application/json')) {
-          throw new TypeError(
-            `Expected JSON but received: ` +
-            `${contentType || 'unknown content type'}`
-          );
-        }
-
-        return await response.json();
-      }
-    } catch (error) {
-      lastError = error;
-
-      const status = Number(error?.status);
-
-      const retryable =
-        error?.name === 'AbortError' ||
-        !Number.isFinite(status) ||
-        isRetryableStatus(status);
-
-      if (!retryable || attempt >= retries) {
-        throw new Error(
-          `Unable to retrieve ${url}: ` +
-          `${error?.message || String(error)}`,
-          { cause: error }
-        );
-      }
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    if (attempt < retries) {
-      const backoffMs = 1000 * (2 ** (attempt - 1));
-      await sleep(backoffMs);
     }
   }
 
-  throw new Error(
-    `Unable to retrieve ${url} after ` +
-    `${retries} attempts: ` +
-    `${lastError?.message || String(lastError)}`
-  );
+  return mergedPlayers.sort((a, b) => {
+    const rankA =
+      Number(a.rankings?.overall) || 99999;
+
+    const rankB =
+      Number(b.rankings?.overall) || 99999;
+
+    return (
+      rankA - rankB ||
+      String(a.position).localeCompare(
+        String(b.position)
+      ) ||
+      String(a.name).localeCompare(
+        String(b.name)
+      )
+    );
+  });
 }
 
-function summarizePlayers(players) {
+function validatePlayers(players) {
   if (!Array.isArray(players)) {
     throw new TypeError(
-      'summarizePlayers requires an array.'
+      'Merged player data must be an array.'
     );
   }
 
+  if (players.length === 0) {
+    throw new Error(
+      'Merged player data contains no players.'
+    );
+  }
+
+  const validPositions = new Set([
+    'QB',
+    'RB',
+    'WR',
+    'TE',
+    'K',
+    'DEF'
+  ]);
+
+  const seenIds = new Set();
+  const errors = [];
+
+  for (const player of players) {
+    if (!player.playerId) {
+      errors.push(
+        `Missing playerId: ${player.name || 'Unknown'}`
+      );
+    }
+
+    if (!player.name) {
+      errors.push(
+        `Missing player name: ${player.playerId || 'Unknown'}`
+      );
+    }
+
+    if (!validPositions.has(player.position)) {
+      errors.push(
+        `Invalid position for ${player.name}: ${player.position}`
+      );
+    }
+
+    if (seenIds.has(player.playerId)) {
+      errors.push(
+        `Duplicate playerId: ${player.playerId}`
+      );
+    }
+
+    seenIds.add(player.playerId);
+  }
+
+  if (errors.length > 0) {
+    throw new Error(
+      [
+        'Player validation failed.',
+        ...errors.slice(0, 20)
+      ].join('\n')
+    );
+  }
+
+  return {
+    valid: true,
+    playerCount: players.length
+  };
+}
+
+function buildSummary(players) {
   const positionCounts = {};
   const injuryCounts = {};
 
   let activePlayers = 0;
-  let freeAgents = 0;
+  let rankedPlayers = 0;
+  let playersWithAdp = 0;
 
   for (const player of players) {
     positionCounts[player.position] =
-      (positionCounts[player.position] ?? 0) + 1;
+      (positionCounts[player.position] || 0) + 1;
 
     const injuryStatus =
       player.injury?.status || 'Healthy';
 
     injuryCounts[injuryStatus] =
-      (injuryCounts[injuryStatus] ?? 0) + 1;
+      (injuryCounts[injuryStatus] || 0) + 1;
 
     if (player.availability?.active) {
       activePlayers += 1;
     }
 
-    if (player.availability?.freeAgent) {
-      freeAgents += 1;
+    if (
+      Number.isFinite(
+        Number(player.rankings?.overall)
+      )
+    ) {
+      rankedPlayers += 1;
+    }
+
+    if (
+      Number.isFinite(
+        Number(player.adp?.consensus)
+      )
+    ) {
+      playersWithAdp += 1;
     }
   }
 
   return {
     totalPlayers: players.length,
     activePlayers,
-
-    inactivePlayers:
-      players.length - activePlayers,
-
-    freeAgents,
+    rankedPlayers,
+    playersWithAdp,
     positionCounts,
     injuryCounts
   };
 }
 
-async function retrievePlayers(options = {}) {
-  const updatedAt = new Date().toISOString();
-
-  const rawPlayers = await fetchJsonWithRetry(
-    SLEEPER_NFL_PLAYERS_URL,
-    options
+async function writeOutput(output) {
+  await fs.mkdir(
+    path.dirname(OUTPUT_FILE),
+    { recursive: true }
   );
 
-  if (
-    rawPlayers === null ||
-    typeof rawPlayers !== 'object' ||
-    Array.isArray(rawPlayers)
-  ) {
-    throw new TypeError(
-      'Sleeper returned an unexpected player-data format.'
-    );
-  }
+  const temporaryFile =
+    `${OUTPUT_FILE}.temporary`;
 
-  const players = Object.entries(rawPlayers)
-    .filter(([playerId, rawPlayer]) => {
-      return shouldIncludePlayer(
-        playerId,
-        rawPlayer
-      );
-    })
-    .map(([playerId, rawPlayer]) => {
-      return mapSleeperPlayer(
-        playerId,
-        rawPlayer,
-        updatedAt
-      );
-    })
-    .sort((a, b) => {
-      return (
-        a.position.localeCompare(b.position) ||
-        a.name.localeCompare(b.name)
-      );
-    });
+  await fs.writeFile(
+    temporaryFile,
+    JSON.stringify(output, null, 2),
+    'utf8'
+  );
 
-  if (players.length === 0) {
-    throw new Error(
-      'Sleeper retrieval returned no usable fantasy players.'
-    );
-  }
-
-  return {
-    schemaVersion: 1,
-    moduleVersion: MODULE_VERSION,
-    source: 'Sleeper',
-    sourceUrl: SLEEPER_NFL_PLAYERS_URL,
-    updatedAt,
-    players,
-    summary: summarizePlayers(players)
-  };
+  await fs.rename(
+    temporaryFile,
+    OUTPUT_FILE
+  );
 }
 
-module.exports = {
-  MODULE_VERSION,
-  SLEEPER_NFL_PLAYERS_URL,
-  normalizePosition,
-  normalizeName,
-  createFallbackPlayerId,
-  isDefenseRecord,
-  resolvePlayerName,
-  normalizeInjuryStatus,
-  nullableFiniteNumber,
-  shouldIncludePlayer,
-  mapSleeperPlayer,
-  fetchJsonWithRetry,
-  summarizePlayers,
-  retrievePlayers
-};
+async function main() {
+  console.log(
+    `Duke's FF26 controller v${CONTROLLER_VERSION}`
+  );
+
+  console.log(
+    'Reading existing player database...'
+  );
+
+  const existingData =
+    await readExistingData();
+
+  console.log(
+    `Existing players: ${existingData.players.length}`
+  );
+
+  console.log(
+    'Retrieving current Sleeper NFL players...'
+  );
+
+  const retrieval =
+    await retrievePlayers({
+      timeoutMs: 30000,
+      retries: 3
+    });
+
+  console.log(
+    `Retrieved players: ${retrieval.players.length}`
+  );
+
+  console.log(
+    'Merging retrieved data with existing data...'
+  );
+
+  const mergedPlayers =
+    mergePlayerCollections(
+      retrieval.players,
+      existingData.players
+    );
+
+  const validation =
+    validatePlayers(mergedPlayers);
+
+  const updatedAt =
+    new Date().toISOString();
+
+  const output = {
+    schemaVersion: 1,
+
+    engine: {
+      name: "Duke's FF26 Live Engine",
+      controllerVersion: CONTROLLER_VERSION,
+      retrievalVersion:
+        retrieval.moduleVersion
+    },
+
+    season:
+      existingData.season || 2026,
+
+    scoring:
+      existingData.scoring || 'PPR',
+
+    updatedAt,
+
+    sources: [
+      ...new Set([
+        ...(existingData.sources || []),
+        'Sleeper'
+      ])
+    ],
+
+    retrieval: {
+      source: retrieval.source,
+      sourceUrl: retrieval.sourceUrl,
+      retrievedAt: retrieval.updatedAt
+    },
+
+    validation,
+
+    summary:
+      buildSummary(mergedPlayers),
+
+    players:
+      mergedPlayers
+  };
+
+  await writeOutput(output);
+
+  console.log(
+    `Successfully saved ${mergedPlayers.length} players.`
+  );
+
+  console.log(
+    `Output: ${OUTPUT_FILE}`
+  );
+}
+
+main().catch(error => {
+  console.error(
+    "Duke's FF26 update failed."
+  );
+
+  console.error(
+    error.stack || error.message || error
+  );
+
+  process.exitCode = 1;
+});
