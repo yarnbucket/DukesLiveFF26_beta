@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "description": "Master player record format for Duke's FF26 live-data system.",
+  "requiredFields": [
+    "playerId",
+    "name",
+    "position"
+  ],
+  "playerTemplate": {
+    "playerId": "stable-player-id",
+    "externalIds": {
+      "sleeper": null,
+      "fantasyPros": null,
+      "espn": null,
+      "yahoo": null
+    },
+
+    "name": "Player Name",
+    "position": "RB",
+    "team": "NFL",
+    "byeWeek": null,
+
+    "rankings": {
+      "overall": null,
+      "position": null,
+      "tier": null,
+      "fantasyPros": null,
+      "espn": null,
+      "yahoo": null,
+      "sleeper": null
+    },
+
+    "adp": {
+      "consensus": null,
+      "fantasyPros": null,
+      "espn": null,
+      "yahoo": null,
+      "sleeper": null
+    },
+
+    "projections": {
+      "seasonPoints": null,
+      "weeklyPoints": null,
+      "receptions": null,
+      "passingYards": null,
+      "passingTouchdowns": null,
+      "rushingYards": null,
+      "rushingTouchdowns": null,
+      "receivingYards": null,
+      "receivingTouchdowns": null
+    },
+
+    "injury": {
+      "status": "Healthy",
+      "bodyPart": "",
+      "practiceStatus": "",
+      "notes": "",
+      "updatedAt": null
+    },
+
+    "availability": {
+      "active": true,
+      "suspended": false,
+      "injuredReserve": false,
+      "physicallyUnableToPerform": false
+    },
+
+    "news": {
+      "headline": "",
+      "summary": "",
+      "source": "",
+      "publishedAt": null
+    },
+
+    "movement": {
+      "previousRank": null,
+      "rankChange": 0,
+      "previousAdp": null,
+      "adpChange": 0,
+      "trend": "neutral"
+    },
+
+    "dukeMetrics": {
+      "draftScore": null,
+      "valueScore": null,
+      "injuryRisk": null,
+      "roleRisk": null,
+      "upsideScore": null,
+      "floorScore": null,
+      "scarcityScore": null,
+      "confidenceScore": null,
+      "sleeperScore": null,
+      "bustRisk": null
+    },
+
+    "sources": [],
+    "updatedAt": null
+  }
+}
