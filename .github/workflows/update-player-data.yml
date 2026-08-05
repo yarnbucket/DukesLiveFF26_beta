@@ -32,6 +32,16 @@ jobs:
       - name: Run player data updater
         run: node scripts/update-player-data.js
 
+      - name: Preserve generated player data
+        run: |
+          cp data/live-player-data.json /tmp/live-player-data.json
+
+      - name: Synchronize with latest main
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+          cp /tmp/live-player-data.json data/live-player-data.json
+
       - name: Commit updated player data
         run: |
           git config user.name "Duke's FF26 Data Bot"
@@ -45,6 +55,4 @@ jobs:
           fi
 
           git commit -m "Update fantasy player data"
-
-          git pull --rebase origin main
           git push origin HEAD:main
