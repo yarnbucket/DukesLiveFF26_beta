@@ -1,0 +1,41 @@
+name: Update Fantasy Player Data
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: "17 10 * * *"
+    - cron: "17 18 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  update-player-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run player data updater
+        run: node scripts/update-player-data.js
+
+      - name: Commit updated player data
+        run: |
+          git config user.name "Duke's FF26 Data Bot"
+          git config user.email "actions@users.noreply.github.com"
+
+          git add data/live-player-data.json
+
+          if git diff --cached --quiet; then
+            echo "No player-data changes."
+          else
+            git commit -m "Update fantasy player data"
+            git push
+          fi
