@@ -1,8 +1,5 @@
 {
-  "schemaVersion": 1,
-  "season": 2026,
-  "scoring": "PPR",
-  "updatedAt": null,
-  "sources": [],
+  "updatedAt": "2026-08-05T18:48:38.491Z",
+  "message": "GitHub Actions is working!",
   "players": []
 }
